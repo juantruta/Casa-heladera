@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#1f6feb">
+<title>Heladeras – remoto</title>
+<script src="https://unpkg.com/mqtt@5/dist/mqtt.min.js"></script>
+<style>
+:root{--bg:#f4f6f8;--card:#fff;--txt:#1d2733;--sub:#5b6875;--borde:#d5dbe1;--pri:#1f6feb;--ok:#1a7f37;--warn:#b26b00;--err:#c62828}
+@media (prefers-color-scheme:dark){:root{--bg:#0f141a;--card:#18202a;--txt:#e6edf3;--sub:#9aa7b4;--borde:#2c3846;--pri:#4c8dff;--ok:#3fb950;--warn:#d29922;--err:#f85149}}
+*{box-sizing:border-box}
+body{font-family:system-ui,Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--txt);margin:0}
+header{background:var(--pri);color:#fff;padding:12px 16px;display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:2}
+header h1{font-size:18px;margin:0;flex:1}
+#st{font-size:12px;padding:3px 9px;border-radius:10px;background:#0004}
+#st.on{background:#2e7d32}#st.off{background:#c62828}
+.hb{background:none;border:1px solid #fff8;color:#fff;border-radius:6px;padding:4px 8px;font-size:12px;cursor:pointer}
+main{padding:12px;max-width:980px;margin:auto}
+.card{background:var(--card);border:1px solid var(--borde);border-radius:12px;padding:14px;margin-bottom:12px}
+.top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.top h2{font-size:17px;margin:0;flex:1}
+.dot{width:10px;height:10px;border-radius:50%;background:#9e9e9e;display:inline-block}
+.dot.on{background:#2e7d32}.dot.off{background:#c62828}
+.sub{color:var(--sub);font-size:12px}
+.al{border-radius:8px;padding:8px 10px;margin:10px 0 0;font-weight:600;font-size:14px}
+.al.ok{background:#c8f7c5;color:#14532d}.al.on{background:#e74c3c;color:#fff}.al.pend{background:#ffe8a3;color:#5c4200}
+.temps{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-top:10px}
+.t{background:var(--bg);border-radius:10px;padding:10px;text-align:center}
+.t .l{font-size:12px;color:var(--sub);font-weight:700}.t .v{font-size:26px;font-weight:700;margin-top:2px}
+.t.err .v{color:var(--err);font-size:18px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.chip{padding:5px 10px;border-radius:999px;font-size:12px;font-weight:700;color:#fff;background:#7f8c8d}
+.chip.on{background:#2980b9}.chip.desc{background:#f39c12}.chip.emer{background:#c62828}
+.viejo{opacity:.55}
+#log div{padding:5px 0;border-bottom:1px solid var(--borde);font-size:13px}
+form{max-width:420px;margin:24px auto}
+label{display:block;font-size:13px;margin:10px 0 4px;font-weight:600}
+input{width:100%;padding:9px;font-size:15px;border:1px solid var(--borde);border-radius:8px;background:var(--bg);color:var(--txt)}
+button.p{margin-top:14px;padding:10px 16px;font-size:15px;background:var(--pri);color:#fff;border:0;border-radius:8px;cursor:pointer}
+.vacio{text-align:center;color:var(--sub);padding:30px 10px}
+</style>
+</head>
+<body>
+<header>
+  <h1>❄️ Heladeras</h1>
+  <span id="st">…</span>
+  <button class="hb" onclick="salir()">Salir</button>
+</header>
+<main>
+  <form id="login" class="card" style="display:none" onsubmit="guardar(event)">
+    <b>Conexión al broker MQTT</b>
+    <p class="sub">Los datos se guardan solo en este celular.</p>
+    <label>Dirección del broker</label><input id="fHost" placeholder="xxxxxxxx.ala.us-east-1.emqxsl.com" required>
+    <label>Puerto WebSocket (wss)</label><input id="fPort" type="number" value="8084" required>
+    <p class="sub">EMQX Cloud: 8084 · HiveMQ Cloud: 8884</p>
+    <label>Usuario</label><input id="fUser" autocomplete="username" required>
+    <label>Contraseña</label><input id="fPass" type="password" autocomplete="current-password" required>
+    <button class="p" type="submit">Conectar</button>
+  </form>
+  <div id="panel" style="display:none">
+    <div id="equipos"><div class="vacio">Esperando datos de los equipos…</div></div>
+    <div class="card"><b>Últimos eventos</b><div id="log"><div class="sub">Sin eventos desde que abriste la página</div></div></div>
+  </div>
+</main>
+<script>
+const CLAVE = 'heladeras_mqtt';
+const PREF = 'heladeras/';
+const equipos = {};          // id -> {d, recibido, online}
+let cli = null;
+
+const $ = id => document.getElementById(id);
+function leer(){ try { return JSON.parse(localStorage.getItem(CLAVE)); } catch(e){ return null; } }
+function escribir(c){ try { localStorage.setItem(CLAVE, JSON.stringify(c)); } catch(e){} }
+function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function dur(s){ s=Math.max(0,Math.round(s)); const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
+  return d ? d+'d '+h+'h' : h ? h+'h '+m+'m' : m ? m+'m '+(s%60)+'s' : s+'s'; }
+function estado(t, c){ const e=$('st'); e.textContent=t; e.className=c||''; }
+
+function guardar(ev){
+  ev.preventDefault();
+  const c = { host: $('fHost').value.trim().replace(/^\w+:\/\//,'').replace(/[:\/].*$/,''),
+              port: parseInt($('fPort').value) || 8084, user: $('fUser').value.trim(), pass: $('fPass').value };
+  escribir(c); conectar(c);
+}
+function salir(){
+  try { localStorage.removeItem(CLAVE); } catch(e){}
+  if (cli) cli.end(true);
+  location.reload();
+}
+
+function conectar(c){
+  $('login').style.display='none'; $('panel').style.display='block';
+  estado('conectando…');
+  cli = mqtt.connect('wss://' + c.host + ':' + (c.port || 8084) + '/mqtt', {
+    username: c.user, password: c.pass,
+    clientId: 'web-' + Math.random().toString(16).slice(2, 10),
+    reconnectPeriod: 5000, connectTimeout: 15000, clean: true
+  });
+  cli.on('connect', () => { estado('conectado','on'); cli.subscribe(PREF + '+/#'); });
+  cli.on('reconnect', () => estado('reconectando…'));
+  cli.on('offline', () => estado('sin conexión','off'));
+  cli.on('error', e => { estado(/auth|Not authorized|Bad user/i.test(e.message) ? 'usuario o clave incorrectos' : 'error','off'); });
+  cli.on('message', (topic, payload) => {
+    const p = topic.split('/');            // heladeras/<id>/<tipo>
+    if (p.length < 3) return;
+    const id = p[1], tipo = p[2], txt = payload.toString();
+    const e = equipos[id] || (equipos[id] = { d: null, recibido: 0, online: null });
+    if (tipo === 'estado') { try { e.d = JSON.parse(txt); e.recibido = Date.now(); } catch(_){} }
+    else if (tipo === 'online') e.online = txt === '1';
+    else if (tipo === 'evento') agregarEvento(e.d ? e.d.nombre : id, txt);
+    dibujar();
+  });
+}
+
+function antiguedad(e){
+  // Usa la hora del equipo si la tiene (el mensaje retenido puede ser viejo)
+  if (e.d && e.d.epoch) return Date.now()/1000 - e.d.epoch;
+  return e.recibido ? (Date.now() - e.recibido)/1000 : null;
+}
+
+function tarjetaTemp(nombre, s){
+  if (!s || !s.asig) return '';
+  const v = s.ok ? Number(s.t).toFixed(1) + '°' : 'FALLA';
+  return `<div class="t ${s.ok?'':'err'}"><div class="l">${nombre}</div><div class="v">${v}</div></div>`;
+}
+
+function dibujar(){
+  const ids = Object.keys(equipos).filter(id => equipos[id].d).sort((a,b) =>
+    (equipos[a].d.nombre||a).localeCompare(equipos[b].d.nombre||b));
+  if (!ids.length) return;
+  $('equipos').innerHTML = ids.map(id => {
+    const e = equipos[id], d = e.d, edad = antiguedad(e);
+    const viejo = e.online === false || (edad !== null && edad > Math.max(180, 4 * 30));
+    const dot = e.online === null ? '' : (e.online ? 'on' : 'off');
+    let al;
+    if (d.alarma.activa) al = `<div class="al on">🚨 ALARMA${d.alarma.silenciada?' (silenciada)':''}: ${esc(d.alarma.motivo)}</div>`;
+    else if (d.alarma.pendSeg > 0) al = `<div class="al pend">⏳ Condición de alarma, se activa en ${dur(d.alarma.pendSeg)}</div>`;
+    else al = `<div class="al ok">✅ Sin alarmas</div>`;
+    const temps = (d.simple ? '' : tarjetaTemp('Freezer', d.freezer)) + tarjetaTemp('Heladera', d.heladera) +
+                  tarjetaTemp('Evaporador', d.evaporador);
+    let comp = '❄️ Compresor ' + (d.compresor ? 'ON' : 'OFF');
+    if (d.compresor && d.marchaSeg) comp += ' · ' + dur(d.marchaSeg);
+    const desc = d.desc || {};
+    let dtxt = '🔥 Desc. ' + desc.estado;
+    if (desc.estado === 'Inactivo' && desc.activo) dtxt += ' · próx. ' + dur(desc.proxSeg);
+    return `<div class="card ${viejo?'viejo':''}">
+      <div class="top"><span class="dot ${dot}"></span><h2>${esc(d.nombre || id)}</h2>
+        <span class="sub">${e.online === false ? 'equipo desconectado' : (edad !== null ? 'hace ' + dur(edad) : '')}</span></div>
+      ${al}
+      <div class="temps">${temps}</div>
+      <div class="chips">
+        <span class="chip ${d.compresor?'on':''}">${comp}</span>
+        <span class="chip ${d.forzador?'on':''}">🌬️ Forzador ${d.forzador?'ON':'OFF'}</span>
+        <span class="chip ${desc.estado!=='Inactivo'?'desc':''}">${esc(dtxt)}</span>
+        ${d.emergencia ? '<span class="chip emer">⚠ EMERGENCIA</span>' : ''}
+        ${d.auto === false ? '<span class="chip emer">MANUAL</span>' : ''}
+      </div>
+      <div class="sub" style="margin-top:8px">${esc(id)} · v${esc(d.fw)} · encendido hace ${dur(d.uptime)}${d.wifi && d.wifi.rssi ? ' · WiFi ' + d.wifi.rssi + ' dBm' : ''}</div>
+    </div>`;
+  }).join('');
+}
+
+function agregarEvento(quien, txt){
+  const log = $('log');
+  if (log.firstChild && log.firstChild.className === 'sub') log.innerHTML = '';
+  const el = document.createElement('div');
+  el.textContent = new Date().toLocaleTimeString() + ' · ' + quien + ' · ' + txt;
+  log.prepend(el);
+  while (log.children.length > 50) log.lastChild.remove();
+}
+
+setInterval(dibujar, 10000);   // refresca los "hace X"
+const cfg = leer();
+if (cfg) conectar(cfg); else $('login').style.display = 'block';
+</script>
+</body>
+</html>
