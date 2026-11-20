@@ -263,9 +263,11 @@ function dibujar(){
     let ubic = '';
     if (d.ubic) {
       const u = d.ubic;
-      let det = u.fuente === 'gps'
-        ? `GPS · ${u.sats} satélites · ${u.vel} km/h · ${u.fresco ? 'en vivo' : 'último dato hace ' + dur(u.edadSeg)}`
-        : 'ubicación fija';
+      const precTxt = m => m >= 1000 ? '±' + (m / 1000).toFixed(m >= 10000 ? 0 : 1) + ' km' : '±' + m + ' m';
+      let det;
+      if (u.fuente === 'gps') det = `GPS · ${u.sats} satélites · ${u.vel} km/h · ${u.fresco ? 'en vivo' : 'último dato hace ' + dur(u.edadSeg)}`;
+      else if (u.fuente === 'internet') det = `por internet (${u.metodo === 'wifi' ? 'redes WiFi' : 'IP, aproximada'}) · ${precTxt(u.prec)} · hace ${dur(u.edadSeg)}`;
+      else det = 'ubicación fija';
       ubic = `<div class="ubic">📍 ${(+u.lat).toFixed(5)}, ${(+u.lon).toFixed(5)} <span class="sub">(${det})</span>
         <button class="b sec2 chico" onclick="abrirMapa('${esc(id)}')">Ver mapa</button></div>`;
     }
@@ -302,13 +304,15 @@ function dibujar(){
 
 function abrirMapa(id){
   const e = equipos[id]; if (!e || !e.d || !e.d.ubic) return;
-  const la = +e.d.ubic.lat, lo = +e.d.ubic.lon, r = 0.006;
+  const u = e.d.ubic, la = +u.lat, lo = +u.lon;
+  // Encuadre según la precisión: más alejado si la ubicación es aproximada
+  const r = Math.max(0.006, u.prec ? (u.prec / 111000) * 1.6 : 0);
   abierto = null;
   $('mTit').textContent = '📍 ' + (e.d.nombre || id);
   $('mBody').innerHTML = `<iframe class="mapa" loading="lazy"
       src="https://www.openstreetmap.org/export/embed.html?bbox=${lo-r},${la-r},${lo+r},${la+r}&layer=mapnik&marker=${la},${lo}"></iframe>
     <div class="sec"><a class="b" target="_blank" rel="noopener" href="https://maps.google.com/?q=${la},${lo}">Abrir en Google Maps</a>
-    <span class="sub">${la.toFixed(6)}, ${lo.toFixed(6)}</span></div>`;
+    <span class="sub">${la.toFixed(6)}, ${lo.toFixed(6)}${u.prec ? ' · precisión ±' + u.prec + ' m' : ''}</span></div>`;
   $('modal').style.display = 'flex';
 }
 
